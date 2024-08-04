@@ -10,10 +10,15 @@ services:
         - .env
         volumes:
         - ./data:/data
-        networks:
-        - minio
         restart: always
 
-networks:
-    minio:
-        driver: bridge
+    postgres:
+        image: postgres:13
+        container_name: postgres
+        ports:
+        - "5432:5432"
+        env_file:
+        - .env
+        volumes:
+        - ./data:/var/lib/postgresql/data
+        restart: always

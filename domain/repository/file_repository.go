@@ -2,7 +2,7 @@ package repository
 
 import (
 	"context"
-	"github.com/elskow/Code-Plagiarism-Detector/entity"
+	"github.com/elskow/Code-Plagiarism-Detector/domain/entity"
 	"io"
 )
 
