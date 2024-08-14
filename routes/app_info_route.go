@@ -6,7 +6,7 @@ import (
 )
 
 func AppInfoRoute(route *gin.Engine, c controller.AppInfoController) {
-	routes := route.Group("/")
+	routes := route.Group("/app-info")
 	{
 		routes.GET("/health-check", c.HealthCheck)
 		routes.GET("/go-version", c.GoVersion)
