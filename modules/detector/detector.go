@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/elskow/PlagiProof/constants"
 	"hash"
 	"hash/fnv"
 	"regexp"
@@ -11,42 +12,59 @@ import (
 	"sync"
 )
 
-const ngramSize = 3
+// Detector interface defines the methods for code detection.
+type Detector interface {
+	Run(code string) ([]string, error)
+	removeCommentsAndNamespace(code string) (string, error)
+	extractTokens(code string) ([]string, error)
+	generateFingerprints(tokens []string) ([]string, error)
+}
 
-var (
-	commentNamespacePattern = regexp.MustCompile(`(#.*?\n)|(using\s+namespace\s+std\s*;)|(std::)|(#include\s*<.*?>)`)
-	skipTokenTypes          = map[chroma.TokenType]bool{
-		chroma.Text:               true,
-		chroma.Error:              true,
-		chroma.Comment:            true,
-		chroma.CommentSpecial:     true,
-		chroma.CommentSingle:      true,
-		chroma.CommentMultiline:   true,
-		chroma.CommentPreproc:     true,
-		chroma.CommentPreprocFile: true,
-		chroma.CommentHashbang:    true,
-	}
-	hashPool = sync.Pool{
-		New: func() interface{} {
-			return fnv.New32a()
+// CodeDetector struct implements the Detector interface.
+type CodeDetector struct {
+	commentNamespacePattern *regexp.Regexp
+	skipTokenTypes          map[chroma.TokenType]bool
+	hashPool                sync.Pool
+	lexer                   chroma.Lexer
+}
+
+// NewCodeDetector creates a new instance of CodeDetector.
+func NewCodeDetector() *CodeDetector {
+	return &CodeDetector{
+		commentNamespacePattern: regexp.MustCompile(`(?m)^\s*//.*$|(?s)/\*.*?\*/|(?m)^\s*using\s+namespace\s+\w+;\s*$|(?m)^\s*#include\s*<.*?>\s*$`),
+		skipTokenTypes: map[chroma.TokenType]bool{
+			chroma.Text:               true,
+			chroma.Error:              true,
+			chroma.Comment:            true,
+			chroma.CommentSpecial:     true,
+			chroma.CommentSingle:      true,
+			chroma.CommentMultiline:   true,
+			chroma.CommentPreproc:     true,
+			chroma.CommentPreprocFile: true,
+			chroma.CommentHashbang:    true,
 		},
+		hashPool: sync.Pool{
+			New: func() interface{} {
+				return fnv.New32a()
+			},
+		},
+		lexer: chroma.Coalesce(lexers.Get("cpp")),
 	}
-	lexer = chroma.Coalesce(lexers.Get("cpp"))
-)
+}
 
 // Run the detector on the given code.
-func Run(code string) ([]string, error) {
-	cleanedCode, err := removeCommentsAndNamespace(code)
+func (d *CodeDetector) Run(code string) ([]string, error) {
+	cleanedCode, err := d.removeCommentsAndNamespace(code)
 	if err != nil {
 		return nil, fmt.Errorf("failed to remove comments and namespace: %v", err)
 	}
 
-	tokens, err := extractTokens(cleanedCode)
+	tokens, err := d.extractTokens(cleanedCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract tokens: %v", err)
 	}
 
-	fingerprints, err := generateFingerprints(tokens)
+	fingerprints, err := d.generateFingerprints(tokens)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate fingerprints: %v", err)
 	}
@@ -54,9 +72,49 @@ func Run(code string) ([]string, error) {
 	return fingerprints, nil
 }
 
+// removeCommentsAndNamespace removes comments and the 'using namespace' directive from the code.
+func (d *CodeDetector) removeCommentsAndNamespace(code string) (string, error) {
+	code = d.commentNamespacePattern.ReplaceAllString(code, "")
+
+	// Trim leading and trailing whitespace from each line
+	lines := strings.Split(code, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimSpace(line)
+	}
+	code = strings.Join(lines, "\n")
+
+	// Remove empty lines
+	reEmptyLines := regexp.MustCompile(`(?m)^\s*$[\r\n]*`)
+	code = reEmptyLines.ReplaceAllString(code, "")
+
+	return code, nil
+}
+
+// extractTokens extracts tokens from the given code.
+func (d *CodeDetector) extractTokens(code string) ([]string, error) {
+	if d.lexer == nil {
+		return nil, fmt.Errorf("lexer not found")
+	}
+
+	tokenStream, err := d.lexer.Tokenise(nil, code)
+	if err != nil {
+		return nil, fmt.Errorf("failed to tokenize code: %v", err)
+	}
+
+	tokens := make([]string, 0, len(code)/5) // Estimate initial capacity
+	for _, token := range tokenStream.Tokens() {
+		if d.skipTokenTypes[token.Type] {
+			continue
+		}
+		tokens = append(tokens, token.String())
+	}
+
+	return tokens, nil
+}
+
 // generateFingerprints generates FNV-1a fingerprints for the given code.
-func generateFingerprints(tokens []string) ([]string, error) {
-	ngrams := generateNgrams(tokens, ngramSize)
+func (d *CodeDetector) generateFingerprints(tokens []string) ([]string, error) {
+	ngrams := generateNgrams(tokens, constants.Ngrams)
 
 	fingerprints := make([]string, len(ngrams))
 	var wg sync.WaitGroup
@@ -64,8 +122,8 @@ func generateFingerprints(tokens []string) ([]string, error) {
 		wg.Add(1)
 		go func(i int, ngram string) {
 			defer wg.Done()
-			hashed := hashPool.Get().(hash.Hash32)
-			defer hashPool.Put(hashed)
+			hashed := d.hashPool.Get().(hash.Hash32)
+			defer d.hashPool.Put(hashed)
 			hashed.Reset()
 			_, err := hashed.Write([]byte(ngram))
 			if err != nil {
@@ -77,34 +135,6 @@ func generateFingerprints(tokens []string) ([]string, error) {
 	wg.Wait()
 
 	return fingerprints, nil
-}
-
-// removeCommentsAndNamespace removes comments and namespace declarations from the given code.
-func removeCommentsAndNamespace(code string) (string, error) {
-	cleanedCode := commentNamespacePattern.ReplaceAllString(code, "")
-	return strings.TrimSpace(cleanedCode), nil
-}
-
-// extractTokens extracts tokens from the given code.
-func extractTokens(code string) ([]string, error) {
-	if lexer == nil {
-		return nil, fmt.Errorf("lexer not found")
-	}
-
-	tokenStream, err := lexer.Tokenise(nil, code)
-	if err != nil {
-		return nil, fmt.Errorf("failed to tokenize code: %v", err)
-	}
-
-	tokens := make([]string, 0, len(code)/5) // Estimate initial capacity
-	for _, token := range tokenStream.Tokens() {
-		if skipTokenTypes[token.Type] {
-			continue
-		}
-		tokens = append(tokens, token.String())
-	}
-
-	return tokens, nil
 }
 
 // generateNgrams generates n-grams of the given size from the given tokens.
